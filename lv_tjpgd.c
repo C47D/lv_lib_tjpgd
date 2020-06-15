@@ -7,6 +7,7 @@
  *
  * TODO:
  * - Improve/cleanup/comment code.
+ * - Pass information around with the jd->device member variable.
  * - LVGL FS abstraction layer.
  * - Work when using the read_line callback.
  * - Work on images stored as c arrays and not as files.
@@ -54,38 +55,30 @@ static void decoder_close(lv_img_decoder_t * dec, lv_img_decoder_dsc_t * dsc);
  *   GLOBAL FUNCTIONS
  **********************/
 
+ /* File height and wide */
+typedef struct {
+    uint16_t height;
+    uint16_t width;
+} img_size;
+
  /* User defined device identifier */
 typedef struct {
-    FILE *fp;                       /* File pointer for input function */
-    uint8_t *frame_buffer;          /* Pointer to the frame buffer for output function */
-    uint16_t frame_buffer_width;    /* Width of the frame buffer [pix] */
-} IODEV;
+    FILE        *fp;                /* File pointer for input function */
+    uint8_t     *frame_buffer;      /* Pointer to the frame buffer for output function */
+    void        *work;              /* Work buffer */
+    uint32_t    out_func_calls;     /* NOTE: Keep track on the amount of times the decoder calls the output callbacks */
+    uint16_t    frame_buffer_width; /* Width of the frame buffer [pix] */
+    img_size    size;
+} decoding_ctx_t;
 
 // See: JD_SZBUF		512	/* Size of stream input buffer */
 #define TJPGD_WORK_BUFFER_SIZE  (20*1024)
-
-/* Work buffer */
-void *work = NULL;
 
 /* Decoding session */
 JDEC jdec;
 
 /* Device ID */
-IODEV devid;
-
-/* File heigh and wide */
-typedef struct {
-    uint16_t h;
-    uint16_t w;
-} img_size;
-
-typedef struct {
-    IODEV *iodev;
-    img_size size;
-} decoder_ctx;
-
-/* NOTE: Keep track on the amount of times the decoder calls the output callbacks */
-volatile uint32_t out_func_calls = 0;
+static decoding_ctx_t user_ctx;
 
 #define VALID_FILE_EXTENSION    "jpg"
 
@@ -116,7 +109,7 @@ static uint16_t on_decoder_output_cb(JDEC* jd, void* bitmap, JRECT* rect);
 void lv_tjpgd_init(void)
 {
     /* Allocate work area for tjpgd */
-    work = malloc(TJPGD_WORK_BUFFER_SIZE);
+    user_ctx.work = malloc(TJPGD_WORK_BUFFER_SIZE);
 
     lv_img_decoder_t * dec = lv_img_decoder_create();
 
@@ -158,13 +151,13 @@ static lv_res_t decoder_info(struct _lv_img_decoder * decoder, const void * src,
          /*Check the extension*/
          if(!strcmp(&fn[strlen(fn) - 3], VALID_FILE_EXTENSION)) {
 
-             devid.fp = fopen(fn, "rb");
-             if(!devid.fp) {
+             user_ctx.fp = fopen(fn, "rb");
+             if(!user_ctx.fp) {
                 return LV_RES_INV;
              }
 
              /* Prepare for decompress and get the image information */
-             JRESULT res = jd_prepare(&jdec, on_feed_decoder_cb, work, TJPGD_WORK_BUFFER_SIZE, &devid);
+             JRESULT res = jd_prepare(&jdec, on_feed_decoder_cb, user_ctx.work, TJPGD_WORK_BUFFER_SIZE, &user_ctx);
 
             if (JDR_OK == res) {
                 header->always_zero = 0;
@@ -183,14 +176,16 @@ static lv_res_t decoder_info(struct _lv_img_decoder * decoder, const void * src,
                 header->w = (lv_coord_t) jdec.width / LV_TJPGD_SCALING_FACTOR_DIV;
                 header->h = (lv_coord_t) jdec.height / LV_TJPGD_SCALING_FACTOR_DIV;
 
-                devid.frame_buffer_width = jdec.width / LV_TJPGD_SCALING_FACTOR_DIV;
+                user_ctx.frame_buffer_width = jdec.width / LV_TJPGD_SCALING_FACTOR_DIV;
+                user_ctx.size.height = header->h;
+                user_ctx.size.width = header->w;
 
                 /* NOTE: Allocate memory for the whole decoded image. Should we allocate it on the open callack?
-                 * FIXME: Assume we have successfully allocated memory for devid.frame_buffer buffer */
+                 * FIXME: Assume we have successfully allocated memory for user_ctx.frame_buffer buffer */
                 uint32_t decoded_image_buffer_size = header->w * header->h * BYTES_ON_PIXEL;
-                devid.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
+                user_ctx.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
 
-                if (!devid.frame_buffer) {
+                if (!user_ctx.frame_buffer) {
                     return LV_RES_INV;
                 }
 
@@ -248,7 +243,7 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
                 printf("Error ID: %d", (int) error);
                 retval = LV_RES_INV;
             } else {
-                dsc->img_data = devid.frame_buffer;
+                dsc->img_data = user_ctx.frame_buffer;
                 retval = LV_RES_OK;
             }
 
@@ -266,11 +261,30 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
     return LV_RES_INV;    /*If not returned earlier then it failed*/
 }
 
+/**
+ * Decode `len` pixels starting from the given `x`, `y` coordinates and store them in `buf`.
+ * Required only if the "open" function can't open the whole decoded pixel array. (dsc->img_data == NULL)
+ *
+ * @param decoder pointer to the decoder the function associated with
+ * @param dsc pointer to decoder descriptor
+ * @param x start x coordinate
+ * @param y start y coordinate
+ * @param len number of pixels to decode
+ * @param buf a buffer to store the decoded pixels
+ * @return LV_RES_OK: ok; LV_RES_INV: failed
+ */
 static lv_res_t decoder_read(lv_img_decoder_t * decoder,
                              lv_img_decoder_dsc_t * dsc,
                              lv_coord_t x, lv_coord_t y,
                              lv_coord_t len, uint8_t *buf)
 {
+    /* Allocate memory for a line of decoded data, we can use the image width to calculate the size of it */
+    /*
+                    header->w = (lv_coord_t) jdec.width / LV_TJPGD_SCALING_FACTOR_DIV;
+                header->h = (lv_coord_t) jdec.height / LV_TJPGD_SCALING_FACTOR_DIV;
+
+    */
+
     return LV_RES_OK;
 }
 
@@ -281,7 +295,7 @@ static void decoder_close(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * dsc
 {
     (void) decoder; /*Unused*/
 
-    free(work);
+    free(user_ctx.work);
 
     if(dsc->img_data) {
         free((uint8_t *) dsc->img_data);
@@ -301,12 +315,12 @@ static uint16_t on_feed_decoder_cb(JDEC* jd, uint8_t* buff, uint16_t nbyte)
 {
     uint16_t retval = 0;
 
-    IODEV *dev = (IODEV*) jd->device;
+    decoding_ctx_t *ctx = (decoding_ctx_t *) jd->device;
 
     if (buff) {
-        retval = fread(buff, 1, nbyte, dev->fp);
+        retval = fread(buff, 1, nbyte, ctx->fp);
     } else {
-        retval = fseek(dev->fp, nbyte, SEEK_CUR) ? 0 : nbyte;
+        retval = fseek(ctx->fp, nbyte, SEEK_CUR) ? 0 : nbyte;
     }
 
     return retval;
@@ -322,18 +336,16 @@ static uint16_t on_feed_decoder_cb(JDEC* jd, uint8_t* buff, uint16_t nbyte)
  */
 static uint16_t on_decoder_output_cb(JDEC* jd, void* bitmap, JRECT* rect)
 {
-    out_func_calls++;
-
-    /* Does bitmap means bitmap[0] = red, bitmap[1] = green, bitmap[2] = blue? */
-    IODEV *dev = (IODEV*) jd->device;
+    decoding_ctx_t *ctx = (decoding_ctx_t*) jd->device;
+    ctx->out_func_calls++;
 
     /* Copy decompressed RGB rectangular to the frame buffer */
     uint8_t *src = (uint8_t *) bitmap;
 
     /* Were in the framebuffer we are writing the bitmap data */
-    uint8_t *dst = dev->frame_buffer + (BYTES_ON_PIXEL * ((rect->top * dev->frame_buffer_width) + rect->left));
+    uint8_t *dst = ctx->frame_buffer + (BYTES_ON_PIXEL * ((rect->top * ctx->frame_buffer_width) + rect->left));
     uint16_t bws = BYTES_ON_PIXEL * (rect->right - rect->left + 1); /* Width of source rectangular */
-    uint16_t bwd = BYTES_ON_PIXEL * dev->frame_buffer_width; /* Width of frame buffer */
+    uint16_t bwd = BYTES_ON_PIXEL * ctx->frame_buffer_width; /* Width of frame buffer */
 
     for (uint16_t y = rect->top; y <= rect->bottom; y++) {
         memcpy(dst, src, bws); /* Copy a line */
