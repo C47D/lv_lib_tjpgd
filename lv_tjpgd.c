@@ -7,7 +7,7 @@
  *
  * TODO:
  * - Improve/cleanup/comment code.
- * - Pass information around with the jd->device member variable.
+ * - Try to understand how can we control the amount of pixels we get back from the decoder.
  * - LVGL FS abstraction layer.
  * - Work when using the read_line callback.
  * - Work on images stored as c arrays and not as files.
@@ -69,6 +69,7 @@ typedef struct {
     uint32_t    out_func_calls;     /* NOTE: Keep track on the amount of times the decoder calls the output callbacks */
     uint16_t    frame_buffer_width; /* Width of the frame buffer [pix] */
     img_size    size;
+    JRECT       last_decoded_coord;
 } decoding_ctx_t;
 
 // See: JD_SZBUF		512	/* Size of stream input buffer */
@@ -102,6 +103,7 @@ static uint16_t on_feed_decoder_cb(JDEC* jd, uint8_t* buff, uint16_t nbyte);
  * @retval 1 Continue to decompress, 0 to abort.
  */
 static uint16_t on_decoder_output_cb(JDEC* jd, void* bitmap, JRECT* rect);
+static uint16_t on_decoder_line_output_cb(JDEC* jd, void* bitmap, JRECT* rect);
 
 /**
  * Register the JPG decoder functions in LVGL
@@ -219,8 +221,9 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
 
         if(!strcmp(&fn[strlen(fn) - 3], VALID_FILE_EXTENSION)) {
 
-            /* NOTE: Allocate memory for the whole decoded image. Should we allocate it on the open callack?
-             * FIXME: Assume we have successfully allocated memory for user_ctx.frame_buffer buffer */
+#if 0   /* Lets try decoding the image in chunks ;) */
+
+            /* NOTE: Allocate memory for the whole decoded image. */
             uint32_t decoded_image_buffer_size = user_ctx.size.width * user_ctx.size.height * BYTES_ON_PIXEL;
             user_ctx.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
 
@@ -248,7 +251,14 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
             }
 
             return retval;
+#else
+            dsc->img_data = NULL;
+            retval = LV_RES_OK;
+
+            return retval;
         }
+#endif
+
     }
     /*If it's a JPG file in a  C array...*/
     else if(dsc->src_type == LV_IMG_SRC_VARIABLE) {
@@ -278,14 +288,55 @@ static lv_res_t decoder_read(lv_img_decoder_t * decoder,
                              lv_coord_t x, lv_coord_t y,
                              lv_coord_t len, uint8_t *buf)
 {
-    /* Allocate memory for a line of decoded data, we can use the image width to calculate the size of it */
-    /*
-                    header->w = (lv_coord_t) jdec.width / LV_TJPGD_SCALING_FACTOR_DIV;
-                header->h = (lv_coord_t) jdec.height / LV_TJPGD_SCALING_FACTOR_DIV;
+    lv_res_t retval = LV_RES_INV;
 
-    */
+    /* NOTE: https://github.com/lvgl/lvgl/issues/1547#issuecomment-643585182 */
 
-    return LV_RES_OK;
+    /* NOTE: We could store the amount of pixels LVGL asks for based on x, y and len,
+     * it seems like it is guaranteed that x and y are on the same line of the image
+     * but TJPGD decodes in areas instead of lines, and we can not tell it which area
+     * to decode. */
+
+    uint16_t requested_line = y;
+    bool requested_pixels_ready = false;
+    uint8_t decode_calls = 0;
+
+    /* TODO: Here we keep track of the area of the image currently decoded in the buffer,
+     * from which to which coordinate we have. If we get a request of a line already decoded
+     * data we simply pass it to LVGL, if we don't have it we need to allocate memory for
+     * decoding a whole area of image data. */
+
+
+    if (requested_pixels_ready) {
+        memcpy((void *) buf, (void *) user_ctx.frame_buffer, len);
+        retval = LV_RES_OK;
+    } else {
+
+        /* We do not have the requested pixels, lets decode them! */
+        JRESULT error = JDR_OK;
+
+        /* Allocate memory to store the decoded data */
+        uint32_t decoded_image_buffer_size = user_ctx.size.width * 7 /* Seems like TJPGD always decode up to 7 lines */ * BYTES_ON_PIXEL;
+        user_ctx.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
+
+        /* Decode until we get the requested pixels */
+        while (1) {
+            error = jd_decomp(&jdec, on_decoder_line_output_cb, LV_TJPGD_SCALING_FACTOR);
+
+            /* How to know if we have the requested pixels? aka update requested_pixels_ready */
+            if (decode_calls > 7) {
+                requested_pixels_ready = true;
+            }
+
+            if (requested_pixels_ready) {
+                break;
+            }
+
+            decode_calls++;
+        }
+    }
+
+    return retval;
 }
 
 /**
@@ -337,6 +388,7 @@ static uint16_t on_feed_decoder_cb(JDEC* jd, uint8_t* buff, uint16_t nbyte)
 static uint16_t on_decoder_output_cb(JDEC* jd, void* bitmap, JRECT* rect)
 {
     decoding_ctx_t *ctx = (decoding_ctx_t*) jd->device;
+
     ctx->out_func_calls++;
 
     /* Copy decompressed RGB rectangular to the frame buffer */
@@ -354,4 +406,32 @@ static uint16_t on_decoder_output_cb(JDEC* jd, void* bitmap, JRECT* rect)
     }
 
     return 1;
+}
+
+static uint16_t on_decoder_line_output_cb(JDEC* jd, void* bitmap, JRECT* rect)
+{
+    decoding_ctx_t *ctx = (decoding_ctx_t*) jd->device;
+
+    ctx->out_func_calls++;
+    /* Keep track of the last decoded coordinate */
+    ctx->last_decoded_coord.bottom  = rect->bottom;
+    ctx->last_decoded_coord.top     = rect->top;
+    ctx->last_decoded_coord.left    = rect->left;
+    ctx->last_decoded_coord.right   = rect->right;
+
+    /* Copy decompressed RGB rectangular to the frame buffer */
+    uint8_t *src = (uint8_t *) bitmap;
+
+    /* Were in the framebuffer we are writing the bitmap data */
+    uint8_t *dst = ctx->frame_buffer + (BYTES_ON_PIXEL * ((rect->top * ctx->frame_buffer_width) + rect->left));
+    uint16_t bws = BYTES_ON_PIXEL * (rect->right - rect->left + 1); /* Width of source rectangular */
+    uint16_t bwd = BYTES_ON_PIXEL * ctx->frame_buffer_width; /* Width of frame buffer */
+
+    for (uint16_t y = rect->top; y <= rect->bottom; y++) {
+        memcpy(dst, src, bws); /* Copy a line */
+        src += bws; /* Next line */
+        dst += bwd;
+    }
+
+    return 0;
 }
