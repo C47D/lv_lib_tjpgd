@@ -180,15 +180,6 @@ static lv_res_t decoder_info(struct _lv_img_decoder * decoder, const void * src,
                 user_ctx.size.height = header->h;
                 user_ctx.size.width = header->w;
 
-                /* NOTE: Allocate memory for the whole decoded image. Should we allocate it on the open callack?
-                 * FIXME: Assume we have successfully allocated memory for user_ctx.frame_buffer buffer */
-                uint32_t decoded_image_buffer_size = header->w * header->h * BYTES_ON_PIXEL;
-                user_ctx.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
-
-                if (!user_ctx.frame_buffer) {
-                    return LV_RES_INV;
-                }
-
                 return LV_RES_OK;
             } else {
                 printf("Error ID: %d", (int) res);
@@ -227,6 +218,15 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
         const char * fn = dsc->src;
 
         if(!strcmp(&fn[strlen(fn) - 3], VALID_FILE_EXTENSION)) {
+
+            /* NOTE: Allocate memory for the whole decoded image. Should we allocate it on the open callack?
+             * FIXME: Assume we have successfully allocated memory for user_ctx.frame_buffer buffer */
+            uint32_t decoded_image_buffer_size = user_ctx.size.width * user_ctx.size.height * BYTES_ON_PIXEL;
+            user_ctx.frame_buffer = (uint8_t *) malloc(decoded_image_buffer_size);
+
+            if (!user_ctx.frame_buffer) {
+                return LV_RES_INV;
+            }
 
             /* NOTE
              * This is the first implementation of the JPG decoder support.
