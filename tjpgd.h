@@ -42,7 +42,8 @@ typedef enum {
 	JDR_PAR,	/* 5: Parameter error */
 	JDR_FMT1,	/* 6: Data format error (may be damaged data) */
 	JDR_FMT2,	/* 7: Right format but not supported */
-	JDR_FMT3	/* 8: Not supported JPEG standard */
+	JDR_FMT3,	/* 8: Not supported JPEG standard */
+	JDR_CONTINUE    /* 9: Decompression is already finished */
 } JRESULT;
 
 
@@ -77,6 +78,9 @@ struct JDEC {
 	uint16_t sz_pool;			/* Size of momory pool (bytes available) */
 	uint16_t (*infunc)(JDEC*, uint8_t*, uint16_t);/* Pointer to jpeg stream input function */
 	void* device;				/* Pointer to I/O device identifiler for the session */
+
+    uint16_t line_y;
+    uint16_t line_rst, line_rsc;
 };
 
 
@@ -85,6 +89,17 @@ struct JDEC {
 JRESULT jd_prepare (JDEC*, uint16_t(*)(JDEC*,uint8_t*,uint16_t), void*, uint16_t, void*);
 JRESULT jd_decomp (JDEC*, uint16_t(*)(JDEC*,void*,JRECT*), uint8_t);
 
+
+JRESULT jd_decomp_line_init (
+    JDEC* jd,                               /* Initialized decompression object */
+    uint8_t scale                           /* Output de-scaling factor (0 to 3) */
+);
+
+
+JRESULT jd_decomp_line_next (
+    JDEC* jd,                               /* Initialized decompression object */
+    uint16_t (*outfunc)(JDEC*, void*, JRECT*)  /* RGB output function */
+);
 
 #ifdef __cplusplus
 }

@@ -129,7 +129,7 @@ void lv_tjpgd_init(void)
     /* If open didn't fully open the image this
      * function should give some decoded data
      * (max 1 line) from a given position */
-    lv_img_decoder_set_read_line_cb(dec, decoder_read);
+//    lv_img_decoder_set_read_line_cb(dec, decoder_read);
     /* Close the opened image, free, the allocated
      * resources*/
     lv_img_decoder_set_close_cb(dec, decoder_close);
@@ -242,10 +242,17 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
              * we should decode the image in chunks. When decoding the image in chunks
              * we most surely will need to set dsc->img_data to NULL, then the LVGL image
              * decoder will call the read callback. */
-            error = jd_decomp(&jdec, on_decoder_output_cb, LV_TJPGD_SCALING_FACTOR);
+//            error = jd_decomp(&jdec, on_decoder_output_cb, LV_TJPGD_SCALING_FACTOR);
+
+            error = jd_decomp_line_init(&jdec, LV_TJPGD_SCALING_FACTOR);
+
+            do {
+                error = jd_decomp_line_next(&jdec, on_decoder_output_cb);
+            }while(error == JDR_CONTINUE);
+
 
             if (JDR_OK != error) {
-                printf("Error ID: %d", (int) error);
+                printf("Error ID: %d\n", (int) error);
                 retval = LV_RES_INV;
             } else {
                 dsc->img_data = devid.frame_buffer;

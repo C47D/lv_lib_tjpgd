@@ -692,6 +692,7 @@ static JRESULT mcu_output (
 
 
 
+
 /*-----------------------------------------------------------------------*/
 /* Process restart interval                                              */
 /*-----------------------------------------------------------------------*/
@@ -955,6 +956,57 @@ JRESULT jd_decomp (
 
 	return rc;
 }
+
+JRESULT jd_decomp_line_init (
+    JDEC* jd,                               /* Initialized decompression object */
+    uint8_t scale                           /* Output de-scaling factor (0 to 3) */
+)
+{
+    jd->line_y = 0;
+    jd->line_rsc = 0;
+    jd->line_rst = 0;
+    jd->dcv[2] = jd->dcv[1] = jd->dcv[0] = 0;   /* Initialize DC values */
+
+
+    if (scale > (JD_USE_SCALE ? 3 : 0)) return JDR_PAR;
+    jd->scale = scale;
+
+    return JDR_OK;
+}
+
+
+JRESULT jd_decomp_line_next (
+    JDEC* jd,                               /* Initialized decompression object */
+    uint16_t (*outfunc)(JDEC*, void*, JRECT*)  /* RGB output function */
+)
+{
+    if(jd->line_y >= jd->height) return JDR_OK;
+
+    uint16_t x, mx;
+
+    JRESULT rc;
+
+    mx = jd->msx * 8; /* Size of the MCU (pixel) */
+
+    rc = JDR_OK;
+    for (x = 0; x < jd->width; x += mx) {   /* Horizontal loop of MCUs */
+        if (jd->nrst && jd->line_rst++ == jd->nrst) {    /* Process restart interval if enabled */
+            rc = restart(jd, jd->line_rsc++);
+            if (rc != JDR_OK) return rc;
+            jd->line_rst = 1;
+        }
+        rc = mcu_load(jd);                  /* Load an MCU (decompress huffman coded stream and apply IDCT) */
+        if (rc != JDR_OK) return rc;
+        rc = mcu_output(jd, outfunc, x, jd->line_y); /* Output the MCU (color space conversion, scaling and output) */
+        if (rc != JDR_OK) return rc;
+    }
+
+    jd->line_y += jd->msy * 8;
+
+    if(rc == JDR_OK) rc = JDR_CONTINUE;
+    return rc;
+}
+
 
 
 
